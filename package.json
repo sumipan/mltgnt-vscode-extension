@@ -1,0 +1,62 @@
+{
+  "name": "mltgnt-vscode-extension",
+  "displayName": "mltgnt diary chat",
+  "description": "VSCode chat panel for diary's chat-server (HTTP + SSE)",
+  "version": "0.1.0",
+  "publisher": "sumipan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sumipan/mltgnt-vscode-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "diary.openChatPanel",
+        "title": "diary: Open Chat Panel",
+        "category": "diary"
+      }
+    ],
+    "configuration": {
+      "title": "diary chat",
+      "properties": {
+        "diary.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "URL of the diary chat-server (scripts/chat-server.py). Reachable via VPN/loopback."
+        },
+        "diary.persona": {
+          "type": "string",
+          "default": "",
+          "description": "Default persona slug for new sessions (e.g. フチコマ)."
+        },
+        "diary.streamTimeoutSec": {
+          "type": "number",
+          "default": 120,
+          "description": "Max seconds to wait for SSE stream completion before giving up."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test:unit": "mocha --require ts-node/register 'src/test/**/*.test.ts'"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "mocha": "^10.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}
