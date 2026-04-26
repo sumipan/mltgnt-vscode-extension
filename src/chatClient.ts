@@ -38,7 +38,8 @@ export class ChatClient {
 
   /**
    * SSE で /chat/stream を購読する。
-   * 戻り値はキャンセル関数。サーバー無応答 5 秒でエラー、SSE 切断後 3 秒で最大 3 回再接続。
+   * 戻り値はキャンセル関数。初期応答 5 秒でエラー、SSE 切断後 3 秒で最大 3 回再接続。
+   * keepalive コメントをサーバーが送るため、レスポンス受信後のアイドルタイマーは使用しない。
    */
   streamResponse(
     session: string,
@@ -48,16 +49,14 @@ export class ChatClient {
     timeoutSec: number = 120
   ): () => void {
     let cancelled = false;
+    let retrying = false;
     let attempt = 0;
     const maxAttempts = 3;
     const reconnectDelayMs = 3000;
-    const idleTimeoutMs = 5000;
+    const connectTimeoutMs = 5000; // HTTP レスポンスヘッダー到着までのタイムアウト
     let activeReq: http.ClientRequest | null = null;
-    let idleTimer: NodeJS.Timeout | null = null;
 
     const cleanup = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = null;
       if (activeReq) {
         activeReq.destroy();
         activeReq = null;
@@ -87,26 +86,19 @@ export class ChatClient {
           headers: { Accept: 'text/event-stream' },
         },
         (res) => {
+          // レスポンスヘッダーが届いたので接続タイムアウトを解除
+          req.setTimeout(0);
+
           if (res.statusCode && res.statusCode >= 400) {
             onError(`SSE HTTP ${res.statusCode}`);
             cancel();
             return;
           }
 
-          const armIdle = () => {
-            if (idleTimer) clearTimeout(idleTimer);
-            idleTimer = setTimeout(() => {
-              onError('SSE idle timeout');
-              tryReconnect();
-            }, idleTimeoutMs);
-          };
-
           let buffer = '';
-          armIdle();
 
           res.setEncoding('utf-8');
           res.on('data', (chunk: string) => {
-            armIdle();
             buffer += chunk;
             let sepIdx: number;
             while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
@@ -123,8 +115,7 @@ export class ChatClient {
                 return;
               } else if (frame.event === 'error') {
                 onError(frame.data || 'SSE error');
-                cleanup();
-                cancelled = true;
+                cancel();
                 return;
               }
             }
@@ -134,23 +125,23 @@ export class ChatClient {
             if (!cancelled) tryReconnect();
           });
           res.on('error', (e) => {
+            if (retrying || cancelled) return; // 二重 tryReconnect を防ぐ
             onError(`SSE response error: ${e.message}`);
-            cleanup();
             tryReconnect();
           });
         }
       );
 
       req.on('error', (e) => {
+        if (retrying || cancelled) return; // 二重 tryReconnect を防ぐ
         onError(`SSE request error: ${e.message}`);
-        cleanup();
         tryReconnect();
       });
 
-      req.setTimeout(idleTimeoutMs, () => {
-        // 初期応答が来ない場合
+      req.setTimeout(connectTimeoutMs, () => {
+        // HTTP レスポンスヘッダーが届かない場合のみ発火
+        if (retrying || cancelled) return;
         onError('SSE connect timeout');
-        cleanup();
         tryReconnect();
       });
 
@@ -159,13 +150,17 @@ export class ChatClient {
     };
 
     const tryReconnect = () => {
+      if (cancelled || retrying) return;
+      retrying = true;
       cleanup();
-      if (cancelled) return;
       if (attempt >= maxAttempts) {
         onError('SSE max retries exhausted');
         return;
       }
-      setTimeout(connect, reconnectDelayMs);
+      setTimeout(() => {
+        retrying = false;
+        connect();
+      }, reconnectDelayMs);
     };
 
     connect();
