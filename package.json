@@ -47,6 +47,7 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "tsc -p ./",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test:unit": "mocha --require ts-node/register 'src/test/**/*.test.ts'"
