@@ -1,0 +1,22 @@
+.github/**
+.vscode/**
+.vscode-test/**
+.gitignore
+
+# Tests
+src/test/**
+out/test/**
+
+# TypeScript sources (compiled output is in out/)
+src/**/*.ts
+
+# Source maps and declaration files (not needed at runtime)
+**/*.map
+**/*.d.ts
+
+# Build / dev configs
+tsconfig.json
+package-lock.json
+
+# Worktree scratch dirs
+worktrees/**
