@@ -1,7 +1,5 @@
 import * as assert from 'assert';
-import * as http from 'http';
 import { ChatClient, parseSSEFrame } from '../chatClient';
-import type { AddressInfo } from 'net';
 
 describe('parseSSEFrame', () => {
   it('parses event + single data', () => {
@@ -24,23 +22,43 @@ describe('parseSSEFrame', () => {
   });
 });
 
-/**
- * 仮想 chat-server を立てて ChatClient の HTTP/SSE 経路を検証する。
- */
-function startStubServer(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<{ url: string; close: () => void }> {
-  return new Promise((resolve) => {
-    const server = http.createServer(handler);
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as AddressInfo;
-      resolve({
-        url: `http://127.0.0.1:${addr.port}`,
-        close: () => server.close(),
-      });
+// Helper to create a mock fetch response
+function mockFetchResponse(options: {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: string | (() => AsyncIterable<Uint8Array>);
+}): Response {
+  const status = options.status ?? 200;
+  const headers = new Headers(options.headers ?? { 'content-type': 'application/json' });
+  const bodyText = typeof options.body === 'string' ? options.body : '';
+
+  if (typeof options.body === 'function') {
+    const asyncIterable = options.body();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for await (const chunk of asyncIterable) {
+          controller.enqueue(chunk);
+        }
+        controller.close();
+      },
     });
-  });
+    return new Response(stream, { status, headers });
+  }
+
+  return new Response(bodyText, { status, headers });
 }
 
 describe('ChatClient', () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   describe('sendMessage', () => {
     it('AC: empty text → throws without HTTP call', async () => {
       const client = new ChatClient('http://127.0.0.1:1');
@@ -48,124 +66,127 @@ describe('ChatClient', () => {
     });
 
     it('AC-2: POST /chat is called with session+text', async () => {
-      let received: any = null;
-      const stub = await startStubServer((req, res) => {
-        let body = '';
-        req.on('data', (c) => (body += c));
-        req.on('end', () => {
-          received = { method: req.method, url: req.url, body: JSON.parse(body) };
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ session: received.body.session, pid: 1 }));
+      let receivedMethod: string | undefined;
+      let receivedUrl: string | undefined;
+      let receivedBody: unknown;
+
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        receivedUrl = input.toString();
+        receivedMethod = init?.method;
+        receivedBody = JSON.parse(init?.body as string);
+        return mockFetchResponse({
+          status: 200,
+          body: JSON.stringify({ session: 's1', pid: 1 }),
         });
-      });
-      try {
-        const client = new ChatClient(stub.url);
-        await client.sendMessage('s1', 'hello');
-        assert.strictEqual(received.method, 'POST');
-        assert.strictEqual(received.url, '/chat');
-        assert.deepStrictEqual(received.body, { session: 's1', text: 'hello' });
-      } finally {
-        stub.close();
-      }
+      };
+
+      const client = new ChatClient('http://127.0.0.1:8765');
+      await client.sendMessage('s1', 'hello');
+      assert.strictEqual(receivedMethod, 'POST');
+      assert.ok(receivedUrl?.endsWith('/chat'));
+      assert.deepStrictEqual(receivedBody, { session: 's1', text: 'hello' });
     });
   });
 
   describe('listSessions / createSession', () => {
     it('GET /sessions returns parsed array', async () => {
-      const stub = await startStubServer((req, res) => {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify([{ session: 'a', path: 'chat/a.md', mtime: 1.0 }]));
-      });
-      try {
-        const client = new ChatClient(stub.url);
-        const items = await client.listSessions();
-        assert.strictEqual(items.length, 1);
-        assert.strictEqual(items[0].session, 'a');
-      } finally {
-        stub.close();
-      }
+      globalThis.fetch = async () => {
+        return mockFetchResponse({
+          status: 200,
+          body: JSON.stringify([{ session: 'a', path: 'chat/a.md', mtime: 1.0 }]),
+        });
+      };
+
+      const client = new ChatClient('http://127.0.0.1:8765');
+      const items = await client.listSessions();
+      assert.strictEqual(items.length, 1);
+      assert.strictEqual(items[0].session, 'a');
     });
 
     it('POST /sessions sends topic+persona', async () => {
-      let body: any;
-      const stub = await startStubServer((req, res) => {
-        let buf = '';
-        req.on('data', (c) => (buf += c));
-        req.on('end', () => {
-          body = JSON.parse(buf);
-          res.writeHead(201, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ session: '2026-04-26_t', path: 'chat/2026-04-26_t.md', mtime: 1.0 }));
+      let receivedBody: unknown;
+
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        receivedBody = JSON.parse(init?.body as string);
+        return mockFetchResponse({
+          status: 201,
+          body: JSON.stringify({ session: '2026-04-26_t', path: 'chat/2026-04-26_t.md', mtime: 1.0 }),
         });
-      });
-      try {
-        const client = new ChatClient(stub.url);
-        await client.createSession('t', 'フチコマ');
-        assert.deepStrictEqual(body, { topic: 't', persona: 'フチコマ' });
-      } finally {
-        stub.close();
-      }
+      };
+
+      const client = new ChatClient('http://127.0.0.1:8765');
+      await client.createSession('t', 'フチコマ');
+      assert.deepStrictEqual(receivedBody, { topic: 't', persona: 'フチコマ' });
     });
   });
 
   describe('streamResponse', () => {
     it('AC-3: receives chunks then done', (done) => {
-      startStubServer((req, res) => {
-        res.writeHead(200, { 'content-type': 'text/event-stream' });
-        res.write('event: chunk\ndata: 一行目\n\n');
-        res.write('event: chunk\ndata: 二行目\n\n');
-        res.write('event: done\ndata: \n\n');
-        res.end();
-      }).then((stub) => {
-        const client = new ChatClient(stub.url);
-        const chunks: string[] = [];
-        let finished = false;
-        client.streamResponse(
-          's',
-          (c) => chunks.push(c),
-          () => {
-            finished = true;
-            stub.close();
-            try {
-              assert.deepStrictEqual(chunks, ['一行目', '二行目']);
-              assert.ok(finished);
-              done();
-            } catch (e) {
-              done(e as Error);
+      const encoder = new TextEncoder();
+      const frames = [
+        'event: chunk\ndata: 一行目\n\n',
+        'event: chunk\ndata: 二行目\n\n',
+        'event: done\ndata: \n\n',
+      ];
+
+      globalThis.fetch = async () => {
+        return mockFetchResponse({
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+          body: async function* () {
+            for (const frame of frames) {
+              yield encoder.encode(frame);
             }
           },
-          (err) => {
-            stub.close();
-            done(new Error('unexpected error: ' + err));
-          },
-          5
-        );
-      });
+        });
+      };
+
+      const client = new ChatClient('http://127.0.0.1:8765');
+      const chunks: string[] = [];
+      let finished = false;
+      client.streamResponse(
+        's',
+        (c) => chunks.push(c),
+        () => {
+          finished = true;
+          try {
+            assert.deepStrictEqual(chunks, ['一行目', '二行目']);
+            assert.ok(finished);
+            done();
+          } catch (e) {
+            done(e as Error);
+          }
+        },
+        (err) => {
+          done(new Error('unexpected error: ' + err));
+        },
+        5
+      );
     });
 
     it('AC: HTTP error → onError called', (done) => {
-      startStubServer((req, res) => {
-        res.writeHead(500);
-        res.end('boom');
-      }).then((stub) => {
-        const client = new ChatClient(stub.url);
-        client.streamResponse(
-          's',
-          () => {
-            stub.close();
-            done(new Error('chunk should not arrive'));
-          },
-          () => {
-            stub.close();
-            done(new Error('done should not arrive'));
-          },
-          (err) => {
-            stub.close();
-            assert.match(err, /500/);
-            done();
-          },
-          5
-        );
-      });
+      globalThis.fetch = async () => {
+        return mockFetchResponse({
+          status: 500,
+          body: 'boom',
+        });
+      };
+
+      const client = new ChatClient('http://127.0.0.1:8765');
+      client.streamResponse(
+        's',
+        () => {
+          done(new Error('chunk should not arrive'));
+        },
+        () => {
+          done(new Error('done should not arrive'));
+        },
+        (err) => {
+          assert.match(err, /500/);
+          done();
+        },
+        5
+      );
     });
   });
 });

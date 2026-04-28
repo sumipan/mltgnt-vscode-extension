@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "module": "commonjs",
+    "module": "ES2020",
     "target": "ES2022",
     "outDir": "out",
     "lib": ["ES2022", "DOM"],
@@ -11,6 +11,11 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "types": ["node", "mocha"]
+  },
+  "ts-node": {
+    "compilerOptions": {
+      "module": "commonjs"
+    }
   },
   "exclude": ["node_modules", ".vscode-test", "out"]
 }

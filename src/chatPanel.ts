@@ -1,6 +1,4 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { ChatClient, SessionInfo } from './chatClient';
 
 type WebviewIncoming =
@@ -55,7 +53,7 @@ export class ChatPanel {
     const cfg = vscode.workspace.getConfiguration('diary');
     this.client = new ChatClient(cfg.get<string>('serverUrl', 'http://127.0.0.1:8765'));
 
-    this.panel.webview.html = this.renderHtml();
+    this.initHtml();
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
@@ -68,6 +66,10 @@ export class ChatPanel {
       null,
       this.disposables
     );
+  }
+
+  private async initHtml(): Promise<void> {
+    this.panel.webview.html = await this.renderHtml();
   }
 
   private async handleIncoming(msg: WebviewIncoming): Promise<void> {
@@ -123,8 +125,7 @@ export class ChatPanel {
       return;
     }
     const uri = editor.document.uri;
-    const ws = vscode.workspace.getWorkspaceFolder(uri);
-    const rel = ws ? path.relative(ws.uri.fsPath, uri.fsPath) : uri.fsPath;
+    const rel = vscode.workspace.asRelativePath(uri);
     const content = editor.document.getText();
     this.post({ type: 'activeFile', relpath: rel, content });
   }
@@ -133,13 +134,13 @@ export class ChatPanel {
     this.panel.webview.postMessage(msg);
   }
 
-  private renderHtml(): string {
+  private async renderHtml(): Promise<string> {
     const htmlPath = vscode.Uri.joinPath(this.extensionUri, 'src', 'webview', 'index.html');
     const jsUri = this.panel.webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'src', 'webview', 'main.js')
     );
     const cspSource = this.panel.webview.cspSource;
-    const html = fs.readFileSync(htmlPath.fsPath, 'utf-8');
+    const html = new TextDecoder().decode(await vscode.workspace.fs.readFile(htmlPath));
     return html
       .replaceAll('{{cspSource}}', cspSource)
       .replaceAll('{{mainJs}}', jsUri.toString());
