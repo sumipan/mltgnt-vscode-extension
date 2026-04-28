@@ -2,7 +2,7 @@
   "name": "mltgnt-vscode-extension",
   "displayName": "mltgnt diary chat",
   "description": "VSCode chat panel for diary's chat-server (HTTP + SSE)",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "sumipan",
   "license": "MIT",
   "repository": {
@@ -16,7 +16,9 @@
     "Other"
   ],
   "browser": "./dist/extension.js",
-  "extensionKind": ["ui"],
+  "extensionKind": [
+    "ui"
+  ],
   "activationEvents": [],
   "contributes": {
     "commands": [
