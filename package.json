@@ -50,7 +50,7 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "tsc -p ./",
+    "vscode:prepublish": "node esbuild.config.mjs",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build": "node esbuild.config.mjs",
