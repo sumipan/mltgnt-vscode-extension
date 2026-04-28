@@ -1,7 +1,3 @@
-import * as http from 'http';
-import * as https from 'https';
-import { URL } from 'url';
-
 export interface SessionInfo {
   session: string;
   path: string;
@@ -15,7 +11,7 @@ interface SSEFrame {
 
 /**
  * chat-server.py との HTTP/SSE 通信レイヤー。
- * Node 標準モジュールのみで実装し、追加依存を減らす。
+ * Web Extension 対応のため fetch + ReadableStream で実装。
  */
 export class ChatClient {
   constructor(private serverUrl: string) {}
@@ -53,13 +49,13 @@ export class ChatClient {
     let attempt = 0;
     const maxAttempts = 3;
     const reconnectDelayMs = 3000;
-    const connectTimeoutMs = 5000; // HTTP レスポンスヘッダー到着までのタイムアウト
-    let activeReq: http.ClientRequest | null = null;
+    const connectTimeoutMs = 5000;
+    let activeController: AbortController | null = null;
 
     const cleanup = () => {
-      if (activeReq) {
-        activeReq.destroy();
-        activeReq = null;
+      if (activeController) {
+        activeController.abort();
+        activeController = null;
       }
     };
 
@@ -68,85 +64,94 @@ export class ChatClient {
       cleanup();
     };
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return;
       attempt += 1;
+
+      const controller = new AbortController();
+      activeController = controller;
 
       const url = new URL('/chat/stream', this.serverUrl);
       url.searchParams.set('session', session);
       url.searchParams.set('timeout', String(timeoutSec));
-      const lib = url.protocol === 'https:' ? https : http;
 
-      const req = lib.request(
-        {
-          method: 'GET',
-          hostname: url.hostname,
-          port: url.port || (url.protocol === 'https:' ? 443 : 80),
-          path: url.pathname + url.search,
-          headers: { Accept: 'text/event-stream' },
-        },
-        (res) => {
-          // レスポンスヘッダーが届いたので接続タイムアウトを解除
-          req.setTimeout(0);
-
-          if (res.statusCode && res.statusCode >= 400) {
-            onError(`SSE HTTP ${res.statusCode}`);
-            cancel();
-            return;
-          }
-
-          let buffer = '';
-
-          res.setEncoding('utf-8');
-          res.on('data', (chunk: string) => {
-            buffer += chunk;
-            let sepIdx: number;
-            while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
-              const raw = buffer.slice(0, sepIdx);
-              buffer = buffer.slice(sepIdx + 2);
-              const frame = parseSSEFrame(raw);
-              if (!frame) continue;
-              if (frame.event === 'chunk') {
-                onChunk(frame.data);
-              } else if (frame.event === 'done') {
-                cleanup();
-                onDone();
-                cancelled = true;
-                return;
-              } else if (frame.event === 'error') {
-                onError(frame.data || 'SSE error');
-                cancel();
-                return;
-              }
-            }
-          });
-          res.on('end', () => {
-            cleanup();
-            if (!cancelled) tryReconnect();
-          });
-          res.on('error', (e) => {
-            if (retrying || cancelled) return; // 二重 tryReconnect を防ぐ
-            onError(`SSE response error: ${e.message}`);
-            tryReconnect();
-          });
-        }
-      );
-
-      req.on('error', (e) => {
-        if (retrying || cancelled) return; // 二重 tryReconnect を防ぐ
-        onError(`SSE request error: ${e.message}`);
-        tryReconnect();
-      });
-
-      req.setTimeout(connectTimeoutMs, () => {
-        // HTTP レスポンスヘッダーが届かない場合のみ発火
+      const connectTimer = setTimeout(() => {
         if (retrying || cancelled) return;
         onError('SSE connect timeout');
         tryReconnect();
-      });
+      }, connectTimeoutMs);
 
-      req.end();
-      activeReq = req;
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          headers: { Accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+
+        clearTimeout(connectTimer);
+
+        if (response.status >= 400) {
+          onError(`SSE HTTP ${response.status}`);
+          cancel();
+          return;
+        }
+
+        if (!response.body) {
+          onError('SSE no response body');
+          cancel();
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          let result: ReadableStreamReadResult<Uint8Array>;
+          try {
+            result = await reader.read();
+          } catch (e) {
+            if (retrying || cancelled) return;
+            onError(`SSE response error: ${e instanceof Error ? e.message : String(e)}`);
+            tryReconnect();
+            return;
+          }
+
+          if (result.done) {
+            cleanup();
+            if (!cancelled) tryReconnect();
+            return;
+          }
+
+          buffer += decoder.decode(result.value, { stream: true });
+
+          let sepIdx: number;
+          while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+            const raw = buffer.slice(0, sepIdx);
+            buffer = buffer.slice(sepIdx + 2);
+            const frame = parseSSEFrame(raw);
+            if (!frame) continue;
+            if (frame.event === 'chunk') {
+              onChunk(frame.data);
+            } else if (frame.event === 'done') {
+              cleanup();
+              onDone();
+              cancelled = true;
+              return;
+            } else if (frame.event === 'error') {
+              onError(frame.data || 'SSE error');
+              cancel();
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        clearTimeout(connectTimer);
+        if (retrying || cancelled) return;
+        onError(`SSE request error: ${e instanceof Error ? e.message : String(e)}`);
+        tryReconnect();
+      }
     };
 
     const tryReconnect = () => {
@@ -167,51 +172,46 @@ export class ChatClient {
     return cancel;
   }
 
-  private requestJson<T>(method: 'GET' | 'POST', pathStr: string, body?: unknown): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const url = new URL(pathStr, this.serverUrl);
-      const lib = url.protocol === 'https:' ? https : http;
-      const payload = body !== undefined ? JSON.stringify(body) : undefined;
-      const req = lib.request(
-        {
-          method,
-          hostname: url.hostname,
-          port: url.port || (url.protocol === 'https:' ? 443 : 80),
-          path: url.pathname + url.search,
-          headers: {
-            Accept: 'application/json',
-            ...(payload
-              ? {
-                  'Content-Type': 'application/json',
-                  'Content-Length': Buffer.byteLength(payload),
-                }
-              : {}),
-          },
+  private async requestJson<T>(method: 'GET' | 'POST', pathStr: string, body?: unknown): Promise<T> {
+    const url = new URL(pathStr, this.serverUrl);
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, 5000);
+
+    try {
+      const response = await fetch(url.toString(), {
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...(payload
+            ? {
+                'Content-Type': 'application/json',
+                'Content-Length': String(new TextEncoder().encode(payload).byteLength),
+              }
+            : {}),
         },
-        (res) => {
-          let data = '';
-          res.setEncoding('utf-8');
-          res.on('data', (c: string) => (data += c));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`HTTP ${res.statusCode}: ${data}`));
-              return;
-            }
-            try {
-              resolve((data ? JSON.parse(data) : undefined) as T);
-            } catch (e) {
-              reject(e instanceof Error ? e : new Error(String(e)));
-            }
-          });
-        }
-      );
-      req.on('error', reject);
-      req.setTimeout(5000, () => {
-        req.destroy(new Error('HTTP request timeout (5s)'));
+        body: payload,
+        signal: controller.signal,
       });
-      if (payload) req.write(payload);
-      req.end();
-    });
+
+      const text = await response.text();
+
+      if (response.status >= 400) {
+        throw new Error(`HTTP ${response.status}: ${text}`);
+      }
+
+      return (text ? JSON.parse(text) : undefined) as T;
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new Error('HTTP request timeout (5s)');
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
