@@ -34,7 +34,8 @@ export class ChatClient {
 
   /**
    * SSE で /chat/stream を購読する。
-   * 戻り値はキャンセル関数。サーバー無応答 5 秒でエラー、SSE 切断後 3 秒で最大 3 回再接続。
+   * 戻り値はキャンセル関数。初期応答 5 秒でエラー、SSE 切断後 3 秒で最大 3 回再接続。
+   * keepalive コメントをサーバーが送るため、レスポンス受信後のアイドルタイマーは使用しない。
    */
   streamResponse(
     session: string,
@@ -44,16 +45,14 @@ export class ChatClient {
     timeoutSec: number = 120
   ): () => void {
     let cancelled = false;
+    let retrying = false;
     let attempt = 0;
     const maxAttempts = 3;
     const reconnectDelayMs = 3000;
-    const idleTimeoutMs = 5000;
+    const connectTimeoutMs = 5000;
     let activeController: AbortController | null = null;
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanup = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = null;
       if (activeController) {
         activeController.abort();
         activeController = null;
@@ -76,21 +75,11 @@ export class ChatClient {
       url.searchParams.set('session', session);
       url.searchParams.set('timeout', String(timeoutSec));
 
-      const armIdle = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
-          onError('SSE idle timeout');
-          cleanup();
-          tryReconnect();
-        }, idleTimeoutMs);
-      };
-
-      // Initial connect timeout
       const connectTimer = setTimeout(() => {
+        if (retrying || cancelled) return;
         onError('SSE connect timeout');
-        cleanup();
         tryReconnect();
-      }, idleTimeoutMs);
+      }, connectTimeoutMs);
 
       try {
         const response = await fetch(url.toString(), {
@@ -116,7 +105,6 @@ export class ChatClient {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        armIdle();
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -124,9 +112,8 @@ export class ChatClient {
           try {
             result = await reader.read();
           } catch (e) {
-            if (cancelled) return;
+            if (retrying || cancelled) return;
             onError(`SSE response error: ${e instanceof Error ? e.message : String(e)}`);
-            cleanup();
             tryReconnect();
             return;
           }
@@ -137,7 +124,6 @@ export class ChatClient {
             return;
           }
 
-          armIdle();
           buffer += decoder.decode(result.value, { stream: true });
 
           let sepIdx: number;
@@ -155,29 +141,31 @@ export class ChatClient {
               return;
             } else if (frame.event === 'error') {
               onError(frame.data || 'SSE error');
-              cleanup();
-              cancelled = true;
+              cancel();
               return;
             }
           }
         }
       } catch (e) {
         clearTimeout(connectTimer);
-        if (cancelled) return;
+        if (retrying || cancelled) return;
         onError(`SSE request error: ${e instanceof Error ? e.message : String(e)}`);
-        cleanup();
         tryReconnect();
       }
     };
 
     const tryReconnect = () => {
+      if (cancelled || retrying) return;
+      retrying = true;
       cleanup();
-      if (cancelled) return;
       if (attempt >= maxAttempts) {
         onError('SSE max retries exhausted');
         return;
       }
-      setTimeout(connect, reconnectDelayMs);
+      setTimeout(() => {
+        retrying = false;
+        connect();
+      }, reconnectDelayMs);
     };
 
     connect();

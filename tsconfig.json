@@ -18,5 +18,5 @@
       "module": "commonjs"
     }
   },
-  "exclude": ["node_modules", ".vscode-test", "out"]
+  "exclude": ["node_modules", ".vscode-test", "out", "worktrees"]
 }
